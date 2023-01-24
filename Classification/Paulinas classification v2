@@ -1,0 +1,340 @@
+setwd("C:\\Users\\serei\\Desktop\\Machine Learning 2\\Exam_classification\\")
+spotify <- read.csv("spotify.csv")
+str(spotify)
+summary(spotify)
+#Convert variables to factor variables
+spotify$key <- as.factor(spotify$key)
+spotify$mode <- as.factor(spotify$mode)
+spotify$time_signature <- as.factor(spotify$time_signature)
+spotify$On_chart <- as.factor(spotify$On_chart)
+
+#Check for the balance of the target variable
+
+library(ggplot2)
+library(ggthemes)
+library(wesanderson)
+
+table(spotify$On_chart)
+ggplot(spotify, aes(x = On_chart, fill = On_chart)) +
+  geom_bar()+
+  theme_clean()+
+  scale_fill_manual(values = wes_palette("GrandBudapest1"))
+
+#Split into training and testing sets
+
+library(caret)
+set.seed(123)
+training_sets <- createDataPartition(spotify$On_chart, 
+                                    p = 0.7, 
+                                    list = FALSE)
+spotify.train <- spotify[training_sets,]
+spotify.test  <- spotify[-training_sets,]
+
+
+table(spotify.test$On_chart)/length(spotify.test$On_chart)
+table(spotify.train$On_chart)/length(spotify.train$On_chart)
+
+
+#### Basic model - we do not expect it to be the best one
+# Should include all variables as presented in the data
+
+library(rpart)
+base_tree.model <- On_chart ~ duration_ms + energy + key + mode + time_signature + acousticness + danceability + instrumentalness + liveness + loudness + speechiness + valence + tempo
+base_tree <- 
+  rpart(base_tree.model , # include all varaibles
+        data = spotify.train, # data
+        method = "class") # type of the tree: classification
+
+library(rpart.plot)
+rpart.plot(base_tree)
+
+summary(base_tree)
+# Instrumentalness, duration and speechiness were most important variables
+
+pred.base_tree <- predict(base_tree, spotify.train, type = "class")
+
+confusionMatrix(data = pred.base_tree, # predictions
+                # actual values
+                reference = spotify.train$On_chart,
+                # definitions of the "success" label
+                positive = "1") 
+
+rpart.plot(base_tree)
+### Accuracy = 0.752
+
+#Try to modify the tree and look into the variables further
+library(tidyverse)
+spotify %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_histogram()+
+  theme_clean()+
+  labs(title = "Distribution of numeric variables")
+
+library(ggpubr)
+annotate_figure(ggarrange( ggplot(spotify, aes(x = key))+ geom_bar() + theme_clean(), 
+           ggplot(spotify, aes(x = mode))+ geom_bar() + theme_clean(),
+           ggplot(spotify, aes(x = time_signature))+ geom_bar() + theme_clean(),
+           nrow = 1), , top = text_grob("Distribution of factor variables"))
+#We can see that most of the numeric variables are not normally distributed
+# time_signature is highly unbalanced and might need to be removed
+# instrumentalness and speechiness are also unbalanced
+
+#correlation of numeric variables
+library(dplyr)
+library(corrplot)
+corrplot(cor(select_if(spotify, is.numeric)), type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45)
+
+#Loudness and energy are highly positively correlated while acousticness and energy are highly negatively correlated
+
+
+#Check for missing values
+sapply(spotify, function(x) sum(is.na(x))) #no missing values 
+
+#Adding spotify artists
+artists <- read_csv("spotify_artist_data.csv")
+
+library(janitor)
+library(eeptools)
+artists <- clean_names(artists)
+sum(is.na(artists$lead_streams))
+artists$lead_streams <- decomma(artists$lead_streams)
+artists$feats <- decomma(artists$feats)
+artists$tracks <- as.numeric(artists$tracks)
+artists$one_billion <- as.numeric(artists$one_billion)
+artists$x100_million <- as.numeric(artists$x100_million)
+artists <- artists[, 2:7]
+
+artists %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_histogram()+
+  theme_clean()+
+  labs(title = "Distribution of numeric variables")
+
+#Log transform as all skewed to the right
+artists$lead_streams <- log(artists$lead_streams)
+artists$feats <- log(artists$feats)
+artists$one_billion <- log(artists$one_billion)
+artists$tracks <- log(artists$tracks)
+artists$x100_million <- log(artists$x100_million)
+
+artists %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_histogram()+
+  theme_clean()+
+  labs(title = "Distribution of log transformed numeric variables")
+
+spotify <- left_join(spotify, artists, by = "artist_name")
+
+#Include if song is featuring another artist
+spotify1 <- spotify #duplicate dataset to keep the original version
+spotify1$incl_feat <- ifelse(grepl("feat", spotify1$track_title, fixed = TRUE, ignore.case = TRUE) == TRUE, 1, 0)
+spotify1$incl_feat <- as.factor(spotify1$incl_feat)
+ggplot(spotify1, aes(x = incl_feat))+ geom_bar() + theme_clean() #very few songs featuring other artists
+
+spotify1$title_length <- nchar(spotify1$track_title)
+ggplot(spotify1, aes(x = title_length))+ geom_histogram() + theme_clean()
+
+#Scale/ normalize  the numeric variables
+
+summary(spotify1)
+
+spotify1$duration_ms <- scale(spotify1$duration_ms)
+spotify1$energy <- scale(spotify1$energy)
+spotify1$acousticness <- scale(spotify1$acousticness)
+spotify1$danceability <- scale(spotify1$danceability)
+spotify1$instrumentalness <- scale(spotify1$instrumentalness)
+spotify1$liveness <- scale(spotify1$liveness)
+spotify1$loudness <- scale(spotify1$loudness)
+spotify1$speechiness <- scale(spotify1$speechiness)
+spotify1$valence <- scale(spotify1$valence)
+spotify1$tempo <- scale(spotify1$tempo)
+
+# Select variables
+#Comvert into dummy variables
+library(fastDummies)
+spotify1 <- dummy_cols(spotify1, select_columns = c("key", "mode", "time_signature", "incl_feat"), remove_selected_columns = TRUE)
+
+spotify1[c("track_title", "track_id", "artist_name")] <- list(NULL) 
+
+#Fill missing values with 0:
+# - even though might seem dodgy, we have merged only the top 1000 artists. If the artist does not appear
+#   in the dataset, we just assume that there is no value
+spotify1 <- replace(spotify1, is.na(spotify1), 0)
+
+spotify1$one_billion <- ifelse(is.finite(spotify1$one_billion), spotify1$one_billion, 0)
+spotify1$x100_million <- ifelse(is.finite(spotify1$x100_million), spotify1$x100_million, 0)
+spotify1$feats <- ifelse(is.finite(spotify1$feats), spotify1$feats, 0)
+spotify1$tracks <- ifelse(is.finite(spotify1$tracks), spotify1$tracks, 0)
+spotify1$lead_streams <- ifelse(is.finite(spotify1$lead_streams), spotify1$lead_streams, 0)
+sum(!is.finite(spotify1$feats))
+#Split into training and testing sets again
+
+library(caret)
+set.seed(123)
+training_sets1 <- createDataPartition(spotify1$On_chart, 
+                                     p = 0.7, 
+                                     list = FALSE)
+spotify1.train <- spotify1[training_sets1,]
+spotify1.test  <- spotify1[-training_sets1,]
+
+tree1.model <- On_chart ~ . - On_chart
+tree1 <- 
+  rpart(tree1.model , # include all varaibles
+        data = spotify1.train, # data
+        method = "class") # type of the tree: classification
+
+pred.tree1 <- predict(tree1, spotify1.train, type = "class")
+
+confusionMatrix(data = pred.tree1, 
+                reference = spotify1.train$On_chart,
+                positive = "1") 
+rpart.plot(tree1)
+#Training test accuracy of 0.9954 when artist name was included, with the excluded artist name it was decreased to 0.759
+# Increased to 0.7756 when artist data was introduced
+tree2.model <- On_chart ~ . - On_chart -acousticness - incl_feat_1 - incl_feat_0 
+tree2 <- rpart(tree2.model, data = spotify1.train, method = "class")
+
+pred.tree2 <- predict(tree2, spotify1.train, type = "class")
+
+confusionMatrix(data = pred.tree2, 
+                reference = spotify1.train$On_chart,
+                positive = "1") 
+rpart.plot(tree2)
+#After removing acousticness, incl_feat the accuracy increased to 0.7699. Removing other variables does not increase the accuracy
+
+#Try surrogate splits: yields smaller accuracy. Try altering complexity of the tree: accuracy remains smaller
+tree2a<- rpart(tree2.model, data = spotify1.train,method = "class")
+pred.tree2a <- predict(tree2a, spotify1.train, type = "class",
+                       minsplit = 1000, 
+                       minbucket = 1000,
+                       maxdepth = 100)
+confusionMatrix(data = pred.tree2a, 
+                reference = spotify1.train$On_chart,
+                positive = "1")
+rpart.plot(tree2a)
+#Pruning the tree
+printcp(tree2a) #results of cross-validation
+which.min(tree2a$cptable[, "xerror"]) #6
+cp <- tree2a$cptable[which.min(tree2a$cptable[, "xerror"]), "CP"] #0.01
+
+tree2b<- rpart(tree2.model, data = spotify1.train,method = "class")
+pred.tree2b <- predict(tree2b, spotify1.train, type = "class", cp = cp)
+confusionMatrix(data = pred.tree2b, 
+                reference = spotify1.train$On_chart,
+                positive = "1")
+rpart.plot(tree2a)
+#Check with the testing dataset 
+pred.test.base_tree  <- predict(base_tree, spotify.test)
+pred.test.tree1 <- predict(tree1, spotify1.test)
+
+confusionMatrix(data = pred.test.base_tree, 
+                reference = spotify.test$On_chart,
+                positive = "1") 
+str(pred.test.tree1)
+
+
+#Variable importance
+barplot(rev(tree1$variable.importance),
+        main = "Tree1",
+        horiz = T,  # horizontal type of plot
+        las = 1,    # labels always horizontally 
+        cex.names = 0.6)
+
+barplot(rev(tree2$variable.importance),
+        main = "Tree2",
+        horiz = T,
+        las = 1,
+        cex.names = 0.6)
+
+barplot(rev(tree2a$variable.importance),
+        main = "Tree2a",
+        horiz = T,
+        las = 1, 
+        cex.names = 0.6)
+## Plot ROC curves
+library(pROC)
+ROC.train.tree1  <- roc(as.numeric(spotify1.train$On_chart == 1), pred.tree1[ ,1])
+
+
+####
+#Bagging and random forest
+## Here we should go for bagging technique
+library(randomForest)
+rf1.model <- On_chart ~ . - On_chart
+
+rf1 <- randomForest(rf1.model, data = spotify1.train)
+
+## Function for Out-Of-Bag sampling
+
+getOOBSampleSize <- function(nObs) {
+  library(tidyverse)
+  sample(1:nObs, size = nObs, replace = T) %>%
+    unique() %>%
+    length()
+} 
+
+nReps <- 10000
+nObs  <- 10000
+time0 <- Sys.time()
+results <- replicate(nReps, getOOBSampleSize(nObs = nObs))
+time1 <- Sys.time()
+time1 - time0
+
+results %>% 
+  enframe() %>%
+  ggplot(aes(value)) +
+  geom_histogram(binwidth = 10, col = "black", fill = "pink") +
+  labs(
+    title = "OOB sample size distribution",
+    subtitle = paste0("nObs = ", nObs, ", nReps = ", nReps),
+    caption = "Source: own simulations"
+  )
+
+print(rf1) ## OOB error at 19%
+
+plot(rf1)
+
+## As the error stabilizes at around 50 trees lets set max for 50
+
+rf2 <- 
+  randomForest(rf1.model,
+               data = spotify1.train,
+               ntree = 50,
+               sampsize = nrow(spotify1.train),
+               mtry = 8,
+               # minimum number of obs in the terminal nodes
+               nodesize = 100,
+               # we also generate predictors importance measures,
+               importance = TRUE)
+print(rf2)
+
+
+rf2a.model <- On_chart ~ . - On_chart -acousticness - incl_feat_1 - incl_feat_0
+
+rf2a <- 
+  randomForest(rf2a.model,
+               data = spotify1.train,
+               ntree = 150,
+               sampsize = nrow(spotify1.train),
+               mtry = 8,
+               # minimum number of obs in the terminal nodes
+               #nodesize = 100,
+               # we also generate predictors importance measures,
+               importance = TRUE)
+print(rf2a) ## OOB 13.71%
+
+
+parameters_rf <- expand.grid(mtry = 2:15)
+ctrl_oob <- trainControl(method = "oob", classProbs = TRUE)
+
+## Hyperparameters + ROC - to be continued
